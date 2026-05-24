@@ -3,7 +3,7 @@ Ranking engine — selects and sorts the top 10 recommendations.
 
 Priority order:
   1. Consensus label (Strong > Moderate > Weak)
-  2. Combined confidence score (higher = better)
+  2. ELO-adjusted confidence score (higher = better)
   3. Bookmaker count (more bookmakers = more liquid = more reliable signal)
   4. Data completeness (all fields populated)
 
@@ -14,6 +14,25 @@ Also assigns accumulator tiers:
 """
 from dataclasses import dataclass
 from typing import Optional
+
+
+def _elo_adjusted_score(base: float, stats: dict, prediction_type: str) -> float:
+    """Blend base confidence with ELO win probability (15% weight).
+
+    Only applied when ClubElo data is present in stats_json.
+    """
+    if not stats.get("elo_home") or not stats.get("elo_away"):
+        return base
+    if prediction_type == "home_win":
+        elo_signal = stats.get("elo_home_win_prob", 0.0)
+    elif prediction_type == "away_win":
+        elo_signal = stats.get("elo_away_win_prob", 0.0)
+    elif prediction_type == "draw":
+        elo_signal = stats.get("elo_draw_prob", 0.0)
+    else:
+        elo_signal = 0.5  # neutral for goals markets
+    adjusted = base * 0.85 + elo_signal * 0.15
+    return round(min(max(adjusted, 0.0), 1.0), 4)
 
 
 @dataclass
@@ -52,23 +71,65 @@ def _completeness_score(pick: dict) -> int:
     return score
 
 
+def _append_enrichment_notes(reasoning: str, stats: dict, prediction_type: str,
+                              home_team: str, away_team: str) -> str:
+    """Append ELO, H2H, and weather notes to an existing reasoning string."""
+    notes: list[str] = []
+
+    elo_diff = stats.get("elo_diff")
+    if elo_diff is not None and abs(elo_diff) >= 25:
+        stronger = home_team if elo_diff > 0 else away_team
+        notes.append(f"ELO edge: {stronger} +{abs(elo_diff):.0f} pts")
+
+    h2h_n = stats.get("h2h_count", 0)
+    if h2h_n >= 3:
+        hw = stats.get("h2h_home_wins", 0)
+        aw = stats.get("h2h_away_wins", 0)
+        d = stats.get("h2h_draws", 0)
+        if prediction_type == "home_win" and hw > aw:
+            notes.append(f"H2H: {home_team} leads {hw}-{d}-{aw} over last {h2h_n}")
+        elif prediction_type == "away_win" and aw > hw:
+            notes.append(f"H2H: {away_team} leads {aw}-{d}-{hw} over last {h2h_n}")
+        elif prediction_type == "draw" and d >= 2:
+            notes.append(f"H2H: {d} draws in last {h2h_n} meetings")
+        avg_g = stats.get("h2h_avg_goals", 0)
+        if avg_g > 0:
+            if prediction_type in ("over_2.5", "btts_yes") and avg_g >= 2.5:
+                notes.append(f"H2H avg goals: {avg_g:.1f}")
+            elif prediction_type in ("under_2.5", "btts_no") and avg_g < 2.5:
+                notes.append(f"H2H avg goals: {avg_g:.1f}")
+
+    weather_risk = stats.get("weather_risk", "")
+    if weather_risk:
+        notes.append(f"Weather: {weather_risk}")
+
+    if not notes:
+        return reasoning
+    return reasoning + " | " + " | ".join(notes) if reasoning else " | ".join(notes)
+
+
 def rank_picks(candidates: list[dict]) -> list[RankedPick]:
     """
     candidates: list of dicts with keys:
       fixture_id, home_team, away_team, league, kickoff_uk,
       prediction_type, confidence, sources_agreeing, consensus_label,
       risk_label, reasoning, best_odds, bookmaker_count,
-      api_prob, bm_implied, form_score
+      api_prob, bm_implied, form_score, stats_json (optional)
 
     Returns top 10 ranked RankedPick objects with accumulator tiers assigned.
     """
-    # Filter: only picks with at least Moderate consensus
-    eligible = [c for c in candidates if c.get("sources_agreeing", 0) >= 2]
+    _1X2 = {"home_win", "away_win", "draw"}
+    eligible = [
+        c for c in candidates
+        if c.get("sources_agreeing", 0) >= 2
+        or (c.get("sources_agreeing", 0) == 1 and c.get("bm_implied", 0) >= 0.62)
+        or (c.get("sources_agreeing", 0) >= 1 and c.get("prediction_type", "") not in _1X2)
+    ]
 
-    # Sort: consensus → confidence → bookmaker count → completeness
+    # Sort: consensus → ELO-adjusted confidence → bookmaker count → completeness
     eligible.sort(key=lambda c: (
         _CONSENSUS_ORDER.get(c.get("consensus_label", "Weak"), 0),
-        c.get("confidence", 0),
+        _elo_adjusted_score(c.get("confidence", 0), c.get("stats_json", {}), c.get("prediction_type", "")),
         c.get("bookmaker_count", 0),
         _completeness_score(c),
     ), reverse=True)
@@ -78,14 +139,21 @@ def rank_picks(candidates: list[dict]) -> list[RankedPick]:
     # Assign accumulator tiers
     result: list[RankedPick] = []
     for i, pick in enumerate(top10):
-        if i < 3 and pick.get("confidence", 0) >= 0.65:
+        stats = pick.get("stats_json", {})
+        elo_conf = _elo_adjusted_score(pick.get("confidence", 0), stats, pick.get("prediction_type", ""))
+
+        if i < 3 and elo_conf >= 0.65:
             tier = "Banker"
-        elif i < 6 and pick.get("confidence", 0) >= 0.58:
+        elif i < 6 and elo_conf >= 0.58:
             tier = "Extended"
         elif i < 10:
             tier = "Value"
         else:
             tier = ""
+
+        reasoning = pick.get("reasoning", "")
+        reasoning = _append_enrichment_notes(reasoning, stats, pick.get("prediction_type", ""),
+                                             pick.get("home_team", ""), pick.get("away_team", ""))
 
         result.append(RankedPick(
             rank=i + 1,
@@ -95,12 +163,12 @@ def rank_picks(candidates: list[dict]) -> list[RankedPick]:
             league=pick.get("league", ""),
             kickoff_uk=pick.get("kickoff_uk", ""),
             prediction_type=pick.get("prediction_type", ""),
-            confidence=pick.get("confidence", 0),
-            confidence_pct=round(pick.get("confidence", 0) * 100, 1),
+            confidence=elo_conf,
+            confidence_pct=round(elo_conf * 100, 1),
             sources_agreeing=pick.get("sources_agreeing", 0),
             consensus_label=pick.get("consensus_label", ""),
             risk_label=pick.get("risk_label", ""),
-            reasoning=pick.get("reasoning", ""),
+            reasoning=reasoning,
             best_odds=pick.get("best_odds"),
             accumulator_tier=tier,
         ))

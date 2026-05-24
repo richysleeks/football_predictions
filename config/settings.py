@@ -32,6 +32,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "")
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 FOOTBALL_DATA_KEY = os.environ.get("FOOTBALL_DATA_KEY", "")
+GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY", "")
 
 # Email
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"

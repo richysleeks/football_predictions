@@ -39,6 +39,7 @@ class Match(models.Model):
     away_points = models.IntegerField(null=True, blank=True)
     total_teams_in_league = models.IntegerField(null=True, blank=True)
     context_notes = models.TextField(blank=True)
+    stats_json = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self) -> str:

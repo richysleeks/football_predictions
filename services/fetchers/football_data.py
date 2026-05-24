@@ -79,13 +79,17 @@ def get_standings(competition_code: str, run=None) -> list[dict]:
     ]
 
 
-def derive_form_score(form_str: str) -> float:
+def derive_form_score(form_str: str, position: int = None, total_teams: int = 20) -> float:
     """
     Convert a form string like 'WWDLW' to a 0.0–1.0 score.
-    W=1.0, D=0.5, L=0.0
+    Falls back to league position when form string is absent (e.g. end-of-season).
+    Position 1 → ~0.90, last place → ~0.20.
     """
-    if not form_str:
-        return 0.5
-    scores = {"W": 1.0, "D": 0.5, "L": 0.0}
-    values = [scores.get(c, 0.5) for c in form_str.upper() if c in scores]
-    return sum(values) / len(values) if values else 0.5
+    if form_str:
+        scores = {"W": 1.0, "D": 0.5, "L": 0.0}
+        values = [scores.get(c, 0.5) for c in form_str.upper() if c in scores]
+        if values:
+            return sum(values) / len(values)
+    if position is not None and total_teams > 1:
+        return round(0.9 - (position - 1) * 0.7 / (total_teams - 1), 3)
+    return 0.5

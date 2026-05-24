@@ -1,0 +1,29 @@
+# Credentials — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+env/
+venv/
+.venv/
+
+# Django
+*.sqlite3
+data/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

@@ -21,6 +21,10 @@ HEADERS = {
 CALL_DELAY = 0.5  # seconds between requests
 
 
+class QuotaExceeded(Exception):
+    """Raised when the API-Football daily quota (429) is hit."""
+
+
 def _headers() -> dict[str, str]:
     return {**HEADERS, "x-rapidapi-key": settings.API_FOOTBALL_KEY}
 
@@ -29,12 +33,16 @@ def _get(endpoint: str, params: dict, run: Any = None) -> dict:
     url = f"{BASE_URL}/{endpoint}"
     try:
         resp = requests.get(url, headers=_headers(), params=params, timeout=10)
+        if resp.status_code == 429:
+            raise QuotaExceeded("API-Football daily quota exhausted (429)")
         resp.raise_for_status()
         if run:
             run.api_football_calls += 1
             run.save(update_fields=["api_football_calls"])
         time.sleep(CALL_DELAY)
         return resp.json()
+    except QuotaExceeded:
+        raise
     except requests.RequestException as exc:
         logger.error("API-Football %s failed: %s", endpoint, exc)
         return {}
@@ -107,6 +115,25 @@ def get_prediction(fixture_id: int, run: Any = None) -> dict:
     pcts = pred.get("percent", {}) or {}
     goals = pred.get("goals", {}) or {}
 
+    def decode_goals(val) -> float | None:
+        """
+        API-Football encodes goals as signed threshold values:
+          -1.5 → predicted under 1.5 goals → expected ≈ 0.75 (midpoint of 0–1)
+          -2.5 → predicted under 2.5 goals → expected ≈ 1.25 (midpoint of 0–2)
+          -3.5 → predicted under 3.5 goals → expected ≈ 1.75 (midpoint of 0–3)
+          +1.5 → predicted over 1.5 goals → expected ≈ 2.0
+          +2.5 → predicted over 2.5 goals → expected ≈ 3.0
+        """
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return None
+        if v < 0:
+            return abs(v) / 2   # midpoint of [0, threshold) range
+        if v > 0:
+            return v + 0.5      # just above threshold
+        return 0.0
+
     return {
         "fixture_id": fixture_id,
         "winner_name": winner.get("name"),
@@ -115,9 +142,9 @@ def get_prediction(fixture_id: int, run: Any = None) -> dict:
         "draw_prob": pct(pcts.get("draw")),
         "away_win_prob": pct(pcts.get("away")),
         "advice": pred.get("advice", ""),
-        "predicted_home_goals": goals.get("home"),
-        "predicted_away_goals": goals.get("away"),
-        "over_under_signal": pred.get("under_over", ""),
+        "predicted_home_goals": decode_goals(goals.get("home")),
+        "predicted_away_goals": decode_goals(goals.get("away")),
+        "over_under_signal": pred.get("under_over") or "",
         "home_form_score": form_score("home"),
         "away_form_score": form_score("away"),
         "home_attack": pct(comp.get("att", {}).get("home")),
